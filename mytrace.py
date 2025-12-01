@@ -20,6 +20,7 @@ def checksum(data):
 def jwrite(path, obj):
     if path is None:
         return
+    obj.setdefault("ts", time.time())
     with open(path, "a") as f:
         f.write(json.dumps(obj) + "\n")
 

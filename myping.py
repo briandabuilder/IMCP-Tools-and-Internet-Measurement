@@ -9,6 +9,22 @@ import json
 ICMP_ECHO_REQUEST = 8
 ICMP_ECHO_REPLY = 0
 
+class OnlineStats:
+    def __init__(self):
+        self.n = 0; self.mean = 0.0; self.M2 = 0.0
+        self.min = float('inf'); self.max = float('-inf')
+    def add(self, x):
+        self.n += 1
+        d = x - self.mean
+        self.mean += d / self.n
+        self.M2 += d * (x - self.mean)
+        self.min = min(self.min, x); self.max = max(self.max, x)
+    def summary(self):
+        var = self.M2 / (self.n - 1) if self.n > 1 else 0.0
+        return {"count": self.n, "min": self.min, "avg": self.mean,
+                "max": self.max, "stddev": var ** 0.5}
+
+# Performs one's complement checksum, which we use for ICMP header
 def checksum(data):
     if len(data) % 2 == 1:
         data += b"\x00"
@@ -20,11 +36,12 @@ def checksum(data):
 def jwrite(path, obj):
     if path is None:
         return
+    obj.setdefault("ts", time.time())
     with open(path, "a") as f:
         f.write(json.dumps(obj) + "\n")
 
 def ping_once(sock, addr, seq, ident, timeout, json_path):
-    # ICMP header: type(8), code(0), checksum(16b), identifier, seq
+    # ICMP header: type(8) - 1 byte, code(0) - 1 byte, checksum(16b) - 2 bytes, identifier - 2 bytes, seq - 2 bytes
     payload = struct.pack("!d", time.time())  # send timestamp
     header = struct.pack("!BBHHH", ICMP_ECHO_REQUEST, 0, 0, ident, seq)
     chksum = checksum(header + payload)
@@ -98,21 +115,23 @@ def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
     ident = os.getpid() & 0xFFFF
 
-    rtts = []
+    s = OnlineStats()
 
     min_interval = max(args.interval, 1.0 / args.qps_limit)
 
     for seq in range(args.count):
         rtt = ping_once(sock, addr, seq, ident, args.timeout, args.json)
         if rtt is not None:
-            rtts.append(rtt)
+            s.add(rtt)
         time.sleep(min_interval)
 
+    stats = s.summary()
+
     # Summary
-    if rtts:
+    if stats["count"] > 0:
         print(f"\n--- {args.target} ping statistics ---")
-        print(f"{len(rtts)}/{args.count} received, loss={(1 - len(rtts)/args.count)*100:.1f}%")
-        print(f"rtt min/avg/max = {min(rtts):.2f}/{sum(rtts)/len(rtts):.2f}/{max(rtts):.2f} ms")
+        print(f"{stats["count"]}/{args.count} received, loss={(1 - stats["count"]/args.count)*100:.1f}%")
+        print(f"min: {stats["min"]:.2f} ms, max: {stats["max"]:.2f} ms, avg: {stats["avg"]:.2f} ms, stddev: {stats["stddev"]:.2f}")
     else:
         print("All packets lost")
 
