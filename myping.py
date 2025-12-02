@@ -5,7 +5,7 @@ import time
 import os
 import json
 
-# ICMP constants
+# constants
 ICMP_ECHO_REQUEST = 8
 ICMP_ECHO_REPLY = 0
 
@@ -24,7 +24,6 @@ class OnlineStats:
         return {"count": self.n, "min": self.min, "avg": self.mean,
                 "max": self.max, "stddev": var ** 0.5}
 
-# Performs one's complement checksum, which we use for ICMP header
 def checksum(data):
     if len(data) % 2 == 1:
         data += b"\x00"
@@ -95,13 +94,18 @@ def ping_once(sock, addr, seq, ident, timeout, json_path):
 
 def main():
     parser = argparse.ArgumentParser(description="ICMP Ping")
-    parser.add_argument("target", help="Hostname or IP to ping")
-    parser.add_argument("--count", type=int, default=4, help="Number of probes")
-    parser.add_argument("--interval", type=float, default=1.0)
-    parser.add_argument("--timeout", type=float, default=1.0)
-    parser.add_argument("--json", type=str)
-    parser.add_argument("--qps-limit", type=float, default=1.0)
-    parser.add_argument("--no-color", action="store_true")
+    arg_list = [
+        ("target", {"help": "Hostname or IP to ping"}),
+        ("--count", {"type": int, "default": 4, "help": "Number of probes"}),
+        ("--interval", {"type": float, "default": 1.0}),
+        ("--timeout", {"type": float, "default": 1.0}),
+        ("--json", {"type": str}),
+        ("--qps-limit", {"type": float, "default": 1.0}),
+        ("--no-color", {"action": "store_true"}),
+    ]
+
+    for arg, options in arg_list:
+        parser.add_argument(arg, **options)
     args = parser.parse_args()
 
     try:
@@ -130,8 +134,8 @@ def main():
     # Summary
     if stats["count"] > 0:
         print(f"\n--- {args.target} ping statistics ---")
-        print(f"{stats["count"]}/{args.count} received, loss={(1 - stats["count"]/args.count)*100:.1f}%")
-        print(f"min: {stats["min"]:.2f} ms, max: {stats["max"]:.2f} ms, avg: {stats["avg"]:.2f} ms, stddev: {stats["stddev"]:.2f}")
+        print(f"{stats['count']}/{args.count} received, loss={(1 - stats['count']/args.count)*100:.1f}%")
+        print(f"min: {stats['min']:.2f} ms, max: {stats['max']:.2f} ms, avg: {stats['avg']:.2f} ms, stddev: {stats['stddev']:.2f}")
     else:
         print("All packets lost")
 
