@@ -40,9 +40,12 @@ def build_packet(flowId):
     # Make the header in a similar way to the ping exercise.
     # Append checksum to the header.
     # So the function ending should look like this
-    ID = (os.getpid()^flowId) & 0xFFFF
+    if flowId == 0:
+        ID = os.getpid() & 0xFFFF
+    else:
+        ID = flowId & 0xFFFF
     header = struct.pack("bbHHh", ICMP_ECHO_REQUEST, 0, 0, ID, 1)
-    data = struct.pack("d", time.time())
+    data = struct.pack("I", flowId)
     # Calculate the checksum on the data and the dummy header.
     myChecksum = checksum(header + data)
     # Get the right checksum, and put in the header
@@ -65,6 +68,8 @@ def get_route(hostname, timeout, max_hops, probe, json_path, n, flowId, rdns, pr
     except:
         print("Could not resolve host")
         return
+    
+    hopList = []
     
     for ttl in range(1, max_hops):
         print(f"{ttl:2d} ", end="", flush=True)
@@ -89,6 +94,19 @@ def get_route(hostname, timeout, max_hops, probe, json_path, n, flowId, rdns, pr
                 print(f"{rtt:.2f}ms ", end="")
 
             except socket.timeout:
+                jwrite(json_path, {
+                        "tool": "trace",
+                        "hop": ttl,
+                        "probe": tries,
+                        "ts_send": send_time,
+                        "ts_recv": recv_time,
+                        "dst": None,
+                        "router_ip": src[0],
+                        "rtt_ms": rtt,
+                        "icmp_type": None,
+                        "flow_id": flowId,
+                        "err": "Scoket Timeout"
+                })
                 print("* ", end="")
             else:
 
@@ -114,18 +132,23 @@ def get_route(hostname, timeout, max_hops, probe, json_path, n, flowId, rdns, pr
                     except socket.herror:
                         host = ipAddress
 
-                addrDisplay = f"{host} ({ipAddress})" if not n else f"{ipAddress}"
+                addrDisplay = f"{host} ({ipAddress})" if host != ipAddress else f"{ipAddress}"
                 if icmpVal[0] == 0:
                     jwrite(json_path, {
                         "tool": "trace",
                         "hop": ttl,
                         "probe": tries,
+                        "ts_send": send_time,
+                        "ts_recv": recv_time,
+                        "dst": host,
                         "router_ip": src[0],
                         "rtt_ms": rtt,
                         "icmp_type": icmpVal[0],
                         "flow_id": flowId,
                         "err": None
                     })
+                    hopList.append(ipAddress)
+                    writeHopList(hostname, hopList)
                     print(f"Destination reached {addrDisplay}\n")
                     return
                 elif icmpVal[0] == 3:
@@ -133,12 +156,17 @@ def get_route(hostname, timeout, max_hops, probe, json_path, n, flowId, rdns, pr
                         "tool": "trace",
                         "hop": ttl,
                         "probe": tries,
+                        "ts_send": send_time,
+                        "ts_recv": recv_time,
+                        "dst": host,
                         "router_ip": src[0],
                         "rtt_ms": rtt,
                         "icmp_type": icmpVal[0],
                         "flow_id": flowId,
                         "err": "Destination unreachable"
                     })
+                    hopList.append(ipAddress)
+                    writeHopList(hostname, hopList)
                     print(f"Destination unreachable {addrDisplay}\n")
                     return
                 elif icmpVal[0] == 11:
@@ -146,6 +174,9 @@ def get_route(hostname, timeout, max_hops, probe, json_path, n, flowId, rdns, pr
                         "tool": "trace",
                         "hop": ttl,
                         "probe": tries,
+                        "ts_send": send_time,
+                        "ts_recv": recv_time,
+                        "dst": host,
                         "router_ip": src[0],
                         "rtt_ms": rtt,
                         "icmp_type": icmpVal[0],
@@ -153,7 +184,8 @@ def get_route(hostname, timeout, max_hops, probe, json_path, n, flowId, rdns, pr
                         "err": None
                     })
                     if tries == probe-1:
-                        print(f"{host} ({ipAddress})")
+                        hopList.append(ipAddress)
+                        print(f"{addrDisplay}")
                 else:
                     print(f"ICMP Error: Type {icmpVal[0]} (code {icmpVal[1]}) {addrDisplay}\n")
                     break 
@@ -163,6 +195,7 @@ def get_route(hostname, timeout, max_hops, probe, json_path, n, flowId, rdns, pr
                 # TODO: close the sockets
                 mySocket.close()
         print()
+    writeHopList(hostname, hopList)
 
 def jwrite(path, obj):
     if path is None:
@@ -170,6 +203,16 @@ def jwrite(path, obj):
     obj.setdefault("ts", time.time())
     with open(path, "a") as f:
         f.write(json.dumps(obj) + "\n")
+
+def jload(path):
+    with open(path) as f:
+        return json.load(f)
+
+def writeHopList(target, hopList):
+    ts = int(time.time())
+    targetName = str(target).replace(".", "-")
+    fileName = "trace_" + targetName + "_" + str(ts)
+    jwrite(fileName, {"hop": hopList})
 
 def main():
     parser = argparse.ArgumentParser(description="ICMP Traceroute")
@@ -184,11 +227,26 @@ def main():
         (["--json"], {"type": str, "help": "Write per-probe results to JSONL file"}),
         (["--qps-limit"], {"type": float, "default": 1.0, "help": "Max probe rate (queries per second)"}),
         (["--no-color"], {"action": "store_true", "help": "Disable color in output"}),
+        (["--diff"], {"nargs": 2, "help": "Compare two trace files and computes Jaccard similarity"})
     ]
 
     for names, options in arg_list:
         parser.add_argument(*names, **options)
     args = parser.parse_args()
+
+    if args.diff:
+        hop1 = jload(args.diff[0])
+        hop2 = jload(args.diff[1])
+
+        s1 = set(hop1["hop"])
+        s2 = set(hop2["hop"])
+
+        intersection = s1 & s2
+        union = s1 | s2
+
+        jaccard = len(intersection) / len(union)
+        print(f"Jaccard similarity: {jaccard:.2f}")
+        return
 
     try:
         addr = socket.gethostbyname(args.target)
