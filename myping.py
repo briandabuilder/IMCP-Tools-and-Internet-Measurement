@@ -1,8 +1,11 @@
 import argparse
 import socket
+import os
+import sys
 import struct
 import time
-import os
+import select
+import binascii
 import json
 
 # constants
@@ -24,13 +27,6 @@ class OnlineStats:
         return {"count": self.n, "min": self.min, "avg": self.mean,
                 "max": self.max, "stddev": var ** 0.5}
 
-def checksum(data):
-    if len(data) % 2 == 1:
-        data += b"\x00"
-    s = sum(int.from_bytes(data[i:i+2], "big") for i in range(0, len(data), 2))
-    s = (s >> 16) + (s & 0xFFFF)
-    s += s >> 16
-    return (~s) & 0xFFFF
 
 def jwrite(path, obj):
     if path is None:
@@ -39,58 +35,154 @@ def jwrite(path, obj):
     with open(path, "a") as f:
         f.write(json.dumps(obj) + "\n")
 
-def ping_once(sock, addr, seq, ident, timeout, json_path):
-    # ICMP header: type(8) - 1 byte, code(0) - 1 byte, checksum(16b) - 2 bytes, identifier - 2 bytes, seq - 2 bytes
-    payload = struct.pack("!d", time.time())  # send timestamp
-    header = struct.pack("!BBHHH", ICMP_ECHO_REQUEST, 0, 0, ident, seq)
-    chksum = checksum(header + payload)
-    header = struct.pack("!BBHHH", ICMP_ECHO_REQUEST, 0, chksum, ident, seq)
+def checksum(string):
+    csum = 0
+    countTo = (len(string) // 2) * 2
+    count = 0
 
-    packet = header + payload
-    ts_send = time.time()
-    sock.sendto(packet, (addr, 1))
+    while count < countTo:
+        thisVal = string[count+1] * 256 + string[count]
+        csum = csum + thisVal
+        csum = csum & 0xffffffff
+        count = count + 2
 
-    sock.settimeout(timeout)
-    try:
-        reply, _ = sock.recvfrom(1024)
-        ts_recv = time.time()
-    except socket.timeout:
-        print(f"seq={seq} timeout")
-        jwrite(json_path, {
-            "tool": "ping",
-            "seq": seq,
-            "dst_ip": addr,
-            "ts_send": ts_send,
-            "ts_recv": None,
-            "err": "timeout"
-        })
-        return None
+    if countTo < len(string):
+        csum = csum + ord(string[len(string) - 1])
+        csum = csum & 0xffffffff
 
-    # Parse response
-    icmp_header = reply[20:28]
-    r_type, r_code, _, r_ident, r_seq = struct.unpack("!BBHHH", icmp_header)
+    csum = (csum >> 16) + (csum & 0xffff)
+    csum = csum + (csum >> 16)
+    answer = ~csum
+    answer = answer & 0xffff
+    answer = answer >> 8 | (answer << 8 & 0xff00)
 
-    if r_type == ICMP_ECHO_REPLY and r_ident == ident and r_seq == seq:
-        sent_ts = struct.unpack("!d", reply[28:36])[0]
-        rtt = (ts_recv - sent_ts) * 1000
-        ttl = reply[8]
-        print(f"seq={seq} rtt={rtt:.2f} ms ttl={ttl}")
-        jwrite(json_path, {
-            "tool": "ping",
-            "seq": seq,
-            "dst_ip": addr,
-            "ts_send": ts_send,
-            "ts_recv": ts_recv,
-            "rtt_ms": rtt,
-            "ttl_reply": ttl,
-            "icmp_type": r_type,
-            "icmp_code": r_code,
-            "err": None
-        })
-        return rtt
+    return answer
+
+
+def receive_one_ping(mySocket, ID, timeout, destAddr, json_path):
+    while 1:
+        what_ready = select.select([mySocket], [], [], timeout)
+        if what_ready[0] == []:  # Timeout
+            return "Request timed out."
+        recPacket, addr = mySocket.recvfrom(1024)
+
+        # TODO: read the packet and parse the source IP address, you will need this part for traceroute
+        ipHeader = recPacket[:20]
+        ipAddress = socket.inet_ntoa(ipHeader[12:16])
+
+        # TODO: calculate and return the round trip time for this ping
+        # TODO: handle different response type and error code, display error message to the user
+        icmpHeader = recPacket[20:28]
+        icmpVal = struct.unpack("bbHHh", icmpHeader)
+
+        if icmpVal[3] == ID:
+            if icmpVal[0] == 0 and icmpVal[1] == 0:
+                # d is 8 bytes
+                then_time = struct.unpack("d", recPacket[28:36])[0]
+                recv_time = time.time()
+                rtt = (recv_time - then_time) * 1000
+                print(f"seq={icmpVal[4]} rtt={rtt:.2f} ms")
+                jwrite(json_path, {
+                    "tool": "ping",
+                    "seq": icmpVal[4],
+                    "dst_ip": addr,
+                    "ts_send": then_time,
+                    "ts_recv": recv_time,
+                    "rtt_ms": rtt,
+                    "icmp_type": icmpVal[0],
+                    "icmp_code": icmpVal[1],
+                    "err": None
+                })
+                return rtt
+
+            if icmpVal[0] == 3:
+                jwrite(json_path, {
+                    "tool": "ping",
+                    "seq": icmpVal[4],
+                    "dst_ip": addr,
+                    "ts_send": then_time,
+                    "ts_recv": recv_time,
+                    "rtt_ms": rtt,
+                    "icmp_type": icmpVal[0],
+                    "icmp_code": icmpVal[1],
+                    "err": "Destination unreachable"
+                })
+                return f"ICMP Error: Destination unreachable (code {icmpVal[1]})"
+            elif icmpVal[0] == 11:
+                jwrite(json_path, {
+                    "tool": "ping",
+                    "seq": icmpVal[4],
+                    "dst_ip": addr,
+                    "ts_send": then_time,
+                    "ts_recv": recv_time,
+                    "rtt_ms": rtt,
+                    "icmp_type": icmpVal[0],
+                    "icmp_code": icmpVal[1],
+                    "err": "Time exceeded"
+                })
+                return f"ICMP Error: Time exceeded (code {icmpVal[1]})"
+            elif icmpVal[0] == 12:
+                jwrite(json_path, {
+                    "tool": "ping",
+                    "seq": icmpVal[4],
+                    "dst_ip": addr,
+                    "ts_send": then_time,
+                    "ts_recv": recv_time,
+                    "rtt_ms": rtt,
+                    "icmp_type": icmpVal[0],
+                    "icmp_code": icmpVal[1],
+                    "err": "IP header parameter invalid"
+                })
+                return f"ICMP Error: IP header parameter invalid (code {icmpVal[1]})"
+            else:
+                jwrite(json_path, {
+                    "tool": "ping",
+                    "seq": icmpVal[4],
+                    "dst_ip": addr,
+                    "ts_send": then_time,
+                    "ts_recv": recv_time,
+                    "rtt_ms": rtt,
+                    "icmp_type": icmpVal[0],
+                    "icmp_code": icmpVal[1],
+                    "err": "Unkown"
+                })
+                return f"ICMP Error: Type {icmpVal[0]} (code {icmpVal[1]})"
+
+def send_one_ping(mySocket, destAddr, ID):
+    # Header is type (8), code (8), checksum (16), id (16), sequence (16)
+    myChecksum = 0
+    # Make a dummy header with a 0 checksum
+
+    # struct -- Interpret strings as packed binary data
+    header = struct.pack("bbHHh", ICMP_ECHO_REQUEST, 0, myChecksum, ID, 1)
+    data = struct.pack("d", time.time())
+    # Calculate the checksum on the data and the dummy header.
+    myChecksum = checksum(header + data)
+    # Get the right checksum, and put in the header
+    if sys.platform == 'darwin':
+        # Convert 16-bit integers from host to network byte order
+        myChecksum = socket.htons(myChecksum) & 0xffff
     else:
-        print(f"seq={seq} non-echo type={r_type} code={r_code}")
-        return None
+        myChecksum = socket.htons(myChecksum)
+
+    header = struct.pack("bbHHh", ICMP_ECHO_REQUEST, 0, myChecksum, ID, 1)
+    packet = header + data
+    # AF_INET address must be tuple, not str # Both LISTS and TUPLES consist of a number of objects
+    mySocket.sendto(packet, (destAddr, 1))
+    # which can be referenced by their position number within the object.
+
+
+def do_one_ping(destAddr, timeout, json_path):
+    icmp = socket.getprotobyname("icmp")
+    # SOCK_RAW is a powerful socket type. For more details: http://sock- raw.org/papers/sock_raw
+    mySocket = socket.socket(socket.AF_INET, socket.SOCK_RAW, icmp)
+    # Return the current process i
+    myID = os.getpid() & 0xFFFF
+    send_one_ping(mySocket, destAddr, myID)
+    delay = receive_one_ping(mySocket, myID, timeout, destAddr, json_path)
+
+    mySocket.close()
+    return delay
 
 def main():
     parser = argparse.ArgumentParser(description="ICMP Ping")
@@ -116,16 +208,15 @@ def main():
 
     print(f"Pinging {args.target} ({addr}) with count={args.count}")
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-    ident = os.getpid() & 0xFFFF
-
     s = OnlineStats()
 
     min_interval = max(args.interval, 1.0 / args.qps_limit)
 
     for seq in range(args.count):
-        rtt = ping_once(sock, addr, seq, ident, args.timeout, args.json)
-        if rtt is not None:
+        rtt = do_one_ping(addr, args.timeout, args.json)
+        if isinstance(rtt, str):
+            print(rtt)
+        else:
             s.add(rtt)
         time.sleep(min_interval)
 
