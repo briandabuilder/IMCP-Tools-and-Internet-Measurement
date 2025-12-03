@@ -226,6 +226,7 @@ def main():
         (["--flow-id"], {"type": int, "default": 0, "help": "Flow ID to keep probes consistent (Paris-style)"}),
         (["--json"], {"type": str, "help": "Write per-probe results to JSONL file"}),
         (["--qps-limit"], {"type": float, "default": 1.0, "help": "Max probe rate (queries per second)"}),
+        (["--i-accept-the-risk"], {"action": "store_true", "help": "Allow probe rates faster than 1 per second (ETHICS & SAFETY REQUIREMENT)"}),
         (["--no-color"], {"action": "store_true", "help": "Disable color in output"}),
         (["--diff"], {"nargs": 2, "help": "Compare two trace files and computes Jaccard similarity"})
     ]
@@ -233,6 +234,11 @@ def main():
     for names, options in arg_list:
         parser.add_argument(*names, **options)
     args = parser.parse_args()
+
+    # ETHICS & SAFETY REQUIREMENT
+    if args.qps_limit > 1.0 and not args.i_accept_the_risk:
+        print("Ethics Warning: Probe rates exceeding 1/second require explicit acknowledgment of risk with a flag.")
+        sys.exit(1)
 
     if args.diff:
         hop1 = jload(args.diff[0])
