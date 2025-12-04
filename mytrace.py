@@ -10,6 +10,21 @@ ICMP_ECHO_REQUEST = 8
 ICMP_TIME_EXCEEDED = 11
 ICMP_ECHO_REPLY = 0
 
+class OnlineStats:
+    def __init__(self):
+        self.n = 0; self.mean = 0.0; self.M2 = 0.0
+        self.min = float('inf'); self.max = float('-inf')
+    def add(self, x):
+        self.n += 1
+        d = x - self.mean
+        self.mean += d / self.n
+        self.M2 += d * (x - self.mean)
+        self.min = min(self.min, x); self.max = max(self.max, x)
+    def summary(self):
+        var = self.M2 / (self.n - 1) if self.n > 1 else 0.0
+        return {"count": self.n, "min": self.min, "avg": self.mean,
+                "max": self.max, "stddev": var ** 0.5}
+
 def checksum(string):
     csum = 0
     countTo = (len(string) // 2) * 2
@@ -73,6 +88,7 @@ def get_route(hostname, timeout, max_hops, probe, json_path, n, flowId, rdns, pr
     
     for ttl in range(1, max_hops):
         print(f"{ttl:2d} ", end="", flush=True)
+        s = OnlineStats()
         for tries in range(probe):
 
             # TODO: create ICMP socket, connect to destination IP, set timeout and time-to-live
@@ -116,6 +132,7 @@ def get_route(hostname, timeout, max_hops, probe, json_path, n, flowId, rdns, pr
                 ipAddress = socket.inet_ntoa(ipHeader[12:16])
                 icmpHeader = recPacket[20:28]
                 icmpVal = struct.unpack("bbHHh", icmpHeader)
+                s.add(rtt)
 
                 if n:
                     host = ipAddress
@@ -185,7 +202,9 @@ def get_route(hostname, timeout, max_hops, probe, json_path, n, flowId, rdns, pr
                     })
                     if tries == probe-1:
                         hopList.append(ipAddress)
-                        print(f"{addrDisplay}")
+                        print(f"{addrDisplay} ")
+                        h = s.summary()
+                        print(f"rtt mean: {h["avg"]:2f}, rtt stddev: {h["stddev"]:2f}")
                 else:
                     print(f"ICMP Error: Type {icmpVal[0]} (code {icmpVal[1]}) {addrDisplay}\n")
                     break 
